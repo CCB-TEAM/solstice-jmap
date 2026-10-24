@@ -209,17 +209,78 @@ public static class Program
                 : flags.Contains("CPF_OutParm", StringComparison.Ordinal) ? "out"
                 : "in";
 
-            list.Add(new ParamInfo(
-                Name: GetString(p, "name") ?? string.Empty,
-                Type: GetString(p, "type") ?? string.Empty,
-                Dir: dir,
-                Cls: GetString(p, "property_class"),
-                Enum: GetString(p, "enum"),
-                Size: p.TryGetProperty("size", out var s) && s.TryGetInt32(out var sv) ? sv : 0,
-                Offset: p.TryGetProperty("offset", out var off) && off.TryGetInt32(out var ov) ? ov : 0));
+            list.Add(ReadParam(p, dir));
         }
 
         return list;
+    }
+
+    /// <summary>
+    /// 读一条属性（参数）的完整类型。
+    ///
+    /// <para>
+    /// 结构体属性没有 <c>property_class</c>，结构路径在 <c>struct</c> 字段里；
+    /// 容器属性把元素类型放在 <c>inner</c> / <c>key_prop</c> / <c>value_prop</c> 里，所以这里递归。
+    /// 少了这些，下游就只知道「是个结构体 / 是个数组」，不知道具体类型。
+    /// </para>
+    /// </summary>
+    private static ParamInfo ReadParam(JsonElement p, string? dir = null)
+        => new(
+            Name: GetString(p, "name") ?? string.Empty,
+            Type: GetString(p, "type") ?? string.Empty,
+            Dir: dir ?? "in",
+            Cls: GetString(p, "property_class") ?? GetString(p, "struct"),
+            Enum: GetString(p, "enum"),
+            Size: p.TryGetProperty("size", out var s) && s.TryGetInt32(out var sv) ? sv : 0,
+            Offset: p.TryGetProperty("offset", out var off) && off.TryGetInt32(out var ov) ? ov : 0,
+            Inner: ReadNested(p, "inner"),
+            Key: ReadNested(p, "key_prop"),
+            Value: ReadNested(p, "value_prop"));
+
+    private static ParamInfo? ReadNested(JsonElement p, string name)
+        => p.TryGetProperty(name, out var nested) && nested.ValueKind == JsonValueKind.Object
+            ? ReadParam(nested)
+            : null;
+
+    /// <summary>
+    /// 写一条参数。容器把元素类型嵌在 <c>inner</c> / <c>key</c> / <c>value</c> 里，
+    /// 老字段（name / type / dir / class / enum / offset / size）保持不变，只多这几个。
+    /// </summary>
+    private static void WriteParam(Utf8JsonWriter w, ParamInfo p, bool includeDir)
+    {
+        w.WriteStartObject();
+        w.WriteString("name", p.Name);
+        w.WriteString("type", p.Type);
+
+        if (includeDir)
+        {
+            w.WriteString("dir", p.Dir);
+        }
+
+        WriteNullable(w, "class", p.Cls);
+        WriteNullable(w, "enum", p.Enum);
+        w.WriteNumber("offset", p.Offset);
+        w.WriteNumber("size", p.Size);
+
+        if (p.Inner is not null)
+        {
+            w.WritePropertyName("inner");
+            WriteParam(w, p.Inner, includeDir: false);
+        }
+
+        if (p.Key is not null)
+        {
+            w.WritePropertyName("key");
+            WriteParam(w, p.Key, includeDir: false);
+        }
+
+        if (p.Value is not null)
+        {
+            w.WritePropertyName("value");
+            WriteParam(w, p.Value, includeDir: false);
+        }
+
+        w.WriteEndObject();
     }
 
     private static void WriteObjects(
@@ -296,15 +357,7 @@ public static class Program
                 w.WriteStartArray("params");
                 foreach (var p in f.Params)
                 {
-                    w.WriteStartObject();
-                    w.WriteString("name", p.Name);
-                    w.WriteString("type", p.Type);
-                    w.WriteString("dir", p.Dir);
-                    WriteNullable(w, "class", p.Cls);
-                    WriteNullable(w, "enum", p.Enum);
-                    w.WriteNumber("offset", p.Offset);
-                    w.WriteNumber("size", p.Size);
-                    w.WriteEndObject();
+                    WriteParam(w, p, includeDir: true);
                 }
 
                 w.WriteEndArray();
@@ -366,5 +419,15 @@ public static class Program
 
     private sealed record FuncInfo(string Name, string? Flags, List<ParamInfo> Params);
 
-    private sealed record ParamInfo(string Name, string Type, string Dir, string? Cls, string? Enum, int Size, int Offset);
+    private sealed record ParamInfo(
+        string Name,
+        string Type,
+        string Dir,
+        string? Cls,
+        string? Enum,
+        int Size,
+        int Offset,
+        ParamInfo? Inner = null,
+        ParamInfo? Key = null,
+        ParamInfo? Value = null);
 }
