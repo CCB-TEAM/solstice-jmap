@@ -1,0 +1,3 @@
+[submodule "external/solstice-assetregistry"]
+	path = external/solstice-assetregistry
+	url = https://github.com/CCB-TEAM/solstice-assetregistry.git

@@ -1,0 +1,13 @@
+<Solution>
+  <Folder Name="/external/" />
+  <Folder Name="/external/solstice-assetregistry/" />
+  <Folder Name="/external/solstice-assetregistry/external/">
+    <Project Path="external/solstice-assetregistry/external/ULocres/ULocres.csproj" />
+  </Folder>
+  <Folder Name="/external/solstice-assetregistry/src/">
+    <Project Path="external/solstice-assetregistry/src/Solstice.AssetRegistry/Solstice.AssetRegistry.csproj" />
+  </Folder>
+  <Folder Name="/src/">
+    <Project Path="src/JmapExtractor/JmapExtractor.csproj" />
+  </Folder>
+</Solution>
