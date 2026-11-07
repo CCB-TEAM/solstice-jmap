@@ -3,8 +3,8 @@
 把 [trumank/jmap](https://github.com/trumank/jmap) 的活对象转储（`.jmap`）与 `AssetRegistry.bin`
 合成两份可直接查询的表。
 
-产出用于「按函数签名生成蓝图字节码」：知道函数有哪些参数、参数的方向标志（**注意 `dir` 不等于输出，见下**）、
-以及是不是 `FUNC_Static`，才能在节点编辑器里正确构造插销和选指令。
+产出用于「按函数签名生成蓝图字节码」：知道函数有哪些参数、**参数方向**、以及是不是 `FUNC_Static`，
+才能在节点编辑器里正确构造插销和选指令。
 
 ## 用法
 
@@ -50,8 +50,10 @@ JmapExtractor <jmap.json> <outDir> [AssetRegistry.bin]
     "IsValid": {
       "flags": "FUNC_Final | FUNC_Native | FUNC_Static | FUNC_Public | FUNC_BlueprintCallable",
       "params": [
-        { "name": "Object",      "type": "ObjectProperty", "dir": "in",     "class": "/Script/CoreUObject.Object", "enum": "", "offset": 0, "size": 8 },
-        { "name": "ReturnValue", "type": "BoolProperty",   "dir": "return", "class": "", "enum": "", "offset": 8, "size": 1 }
+        { "name": "Object",      "type": "ObjectProperty", "dir": "in",     "ref": false, "const": false,
+          "class": "/Script/CoreUObject.Object", "enum": "", "offset": 0, "size": 8 },
+        { "name": "ReturnValue", "type": "BoolProperty",   "dir": "return", "ref": false, "const": false,
+          "class": "", "enum": "", "offset": 8, "size": 1 }
       ]
     }
   }
@@ -79,34 +81,43 @@ JmapExtractor <jmap.json> <outDir> [AssetRegistry.bin]
 
 所以按短名索引时**要额外按后缀匹配一遍**，否则会静默漏掉所有 delegate 签名。
 
-### `dir` 的真实含义
+### 参数方向：`dir` + `ref` + `const`
 
-`dir` 只有三个取值，由属性标志推出（`src/JmapExtractor/Program.cs`）：
+每个**顶层参数**除 `dir` 外还带两个布尔位，直接转录 `CPF_ReferenceParm` / `CPF_ConstParm`。
+方向由三者唯一确定：
 
-```csharp
-var dir = flags.Contains("CPF_ReturnParm") ? "return"
-        : flags.Contains("CPF_OutParm")   ? "out"
-        : "in";
-```
+| `dir` | `ref` | `const` | 含义 | C# |
+|---|---|---|---|---|
+| `return` | — | — | 返回值 | `return` |
+| `out` | `false` | — | 真输出，调用方写回 | `out` |
+| `out` | `true` | `false` | 可读写引用 | `ref` |
+| `out` | `true` | `true` | 按引用只读入参（`UPARAM(ref)` 的 const 引用） | `in` |
+| `in` | `false` | — | 值传递 | 值 |
+| `in` | `true` | `true` | const 引用入参 | `in` |
 
-两个后果：
+**只看 `dir` 会错。** 它是 `CPF_OutParm` 的折叠视图，而 `CPF_OutParm` 也会被 `UPARAM(ref)` 的
+按引用入参置上。实测 `Array_Add`：
 
-1. **`CPF_ReferenceParm` / `CPF_ConstParm` 根本没被读**；
-2. `CPF_OutParm` 也会被 `UPARAM(ref)` 的**按引用入参**置上。
+| 参数 | `dir` | `ref` | `const` | 真实方向 |
+|---|---|---|---|---|
+| `TargetArray` | `out` | `true` | `true` | 入参 |
+| `NewItem` | `out` | `true` | `true` | 入参 |
+| `ReturnValue` | `return` | `false` | `false` | 返回值 |
 
-实测 `Array_Add`：
+对比 `Array_Get`：`Item` 是 `dir=out, ref=false` —— 这个才是真输出。
 
-```json
-[{ "name": "TargetArray", "type": "ArrayProperty", "dir": "out" },
- { "name": "NewItem",     "type": "IntProperty",   "dir": "out" },
- { "name": "ReturnValue", "type": "IntProperty",   "dir": "return" }]
-```
+**全量分布**（KARDS 5.6，26811 个顶层参数）：
 
-而调用点只读 `ReturnValue` —— `NewItem` 是纯输入。
+| 方向 | 数量 |
+|---|---|
+| 值传递 / 只读入参 | 14894 |
+| 返回值 | 6674 |
+| 按引用只读入参（`in`） | 2766 |
+| 真输出（`out`） | 2271 |
+| 可读写引用（`ref`） | 206 |
 
-> **`dir=out` 只等于「按引用传递」，不等于「这是输出」。**
-> 要判定真正的输出参数，得另外拿 `CPF_ReferenceParm` / `CPF_ConstParm`（本工具目前不输出），
-> 或退回资产自身的 `LoadedProperties`。
+> **一份 jmap 足以判定参数方向**，不需要回游戏或回资产补信息。
+> `ref` / `const` 只在顶层参数上写；`inner` / `key` / `value` 这类元素类型没有传参方向。
 
 ### `flags` 与调用形态
 
