@@ -205,11 +205,20 @@ public static class Program
         {
             var flags = GetString(p, "flags") ?? string.Empty;
 
+            // dir 是「按引用 + 输出」的折叠视图，保留它只为向后兼容。
+            // 真正的方向由 ref / const 两个原始标志决定：
+            //   out && !ref           → 真 out（调用方写回）
+            //   out &&  ref && !const → 可读写引用（inout）
+            //   out &&  ref &&  const → 按引用只读入参（UPARAM(ref) 的 const 引用）
+            //   !out                  → 值传递
+            var isRef = flags.Contains("CPF_ReferenceParm", StringComparison.Ordinal);
+            var isConst = flags.Contains("CPF_ConstParm", StringComparison.Ordinal);
+
             var dir = flags.Contains("CPF_ReturnParm", StringComparison.Ordinal) ? "return"
                 : flags.Contains("CPF_OutParm", StringComparison.Ordinal) ? "out"
                 : "in";
 
-            list.Add(ReadParam(p, dir));
+            list.Add(ReadParam(p, dir, isRef, isConst));
         }
 
         return list;
@@ -224,7 +233,7 @@ public static class Program
     /// 少了这些，下游就只知道「是个结构体 / 是个数组」，不知道具体类型。
     /// </para>
     /// </summary>
-    private static ParamInfo ReadParam(JsonElement p, string? dir = null)
+    private static ParamInfo ReadParam(JsonElement p, string? dir = null, bool isRef = false, bool isConst = false)
         => new(
             Name: GetString(p, "name") ?? string.Empty,
             Type: GetString(p, "type") ?? string.Empty,
@@ -235,7 +244,9 @@ public static class Program
             Offset: p.TryGetProperty("offset", out var off) && off.TryGetInt32(out var ov) ? ov : 0,
             Inner: ReadNested(p, "inner"),
             Key: ReadNested(p, "key_prop"),
-            Value: ReadNested(p, "value_prop"));
+            Value: ReadNested(p, "value_prop"),
+            IsRef: isRef,
+            IsConst: isConst);
 
     private static ParamInfo? ReadNested(JsonElement p, string name)
         => p.TryGetProperty(name, out var nested) && nested.ValueKind == JsonValueKind.Object
@@ -244,7 +255,12 @@ public static class Program
 
     /// <summary>
     /// 写一条参数。容器把元素类型嵌在 <c>inner</c> / <c>key</c> / <c>value</c> 里，
-    /// 老字段（name / type / dir / class / enum / offset / size）保持不变，只多这几个。
+    /// 老字段（name / type / dir / class / enum / offset / size）保持不变，只多 <c>ref</c> / <c>const</c>。
+    ///
+    /// <para>
+    /// <c>ref</c> / <c>const</c> 是 <c>CPF_ReferenceParm</c> / <c>CPF_ConstParm</c> 的原文转录，
+    /// 只在顶层参数上写（元素类型没有传参方向）。<c>dir</c> 是它们的折叠视图，保留只为兼容。
+    /// </para>
     /// </summary>
     private static void WriteParam(Utf8JsonWriter w, ParamInfo p, bool includeDir)
     {
@@ -255,6 +271,8 @@ public static class Program
         if (includeDir)
         {
             w.WriteString("dir", p.Dir);
+            w.WriteBoolean("ref", p.IsRef);
+            w.WriteBoolean("const", p.IsConst);
         }
 
         WriteNullable(w, "class", p.Cls);
@@ -429,5 +447,7 @@ public static class Program
         int Offset,
         ParamInfo? Inner = null,
         ParamInfo? Key = null,
-        ParamInfo? Value = null);
+        ParamInfo? Value = null,
+        bool IsRef = false,
+        bool IsConst = false);
 }
