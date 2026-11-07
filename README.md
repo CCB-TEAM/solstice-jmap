@@ -3,7 +3,7 @@
 把 [trumank/jmap](https://github.com/trumank/jmap) 的活对象转储（`.jmap`）与 `AssetRegistry.bin`
 合成两份可直接查询的表。
 
-产出用于「按函数签名生成蓝图字节码」：知道函数有哪些参数、参数方向（in / out / return）、
+产出用于「按函数签名生成蓝图字节码」：知道函数有哪些参数、参数的方向标志（**注意 `dir` 不等于输出，见下**）、
 以及是不是 `FUNC_Static`，才能在节点编辑器里正确构造插销和选指令。
 
 ## 用法
@@ -22,10 +22,10 @@ JmapExtractor <jmap.json> <outDir> [AssetRegistry.bin]
 
 | 文件 | 内容 |
 |---|---|
-| `objects.json` | 对象表。jmap 提供 `/Script`，AssetRegistry 提供 `/Game` |
+| `objects.json` | 对象表。jmap 提供 `/Script`，AssetRegistry 提供 `/Game`、`/Engine` 与插件根 |
 | `objects.kards.json` | 只保留 Kards 相关包，用于缓存 |
-| `functions.json` | 以对象完整路径为 key，函数嵌在对象里，含 `flags` 与 `params` |
-| `functions.kards.json` | 同上，只保留 Kards 包 |
+| `functions.json` | 以**对象完整路径**为 key，函数嵌在对象里，含 `flags` 与 `params` |
+| `functions.kards.json` | 同上，只保留 Kards 包（体积约为完整版的 1/10） |
 
 `metadata` 段会记录计数与来源，便于核对：
 
@@ -58,23 +58,74 @@ JmapExtractor <jmap.json> <outDir> [AssetRegistry.bin]
 }
 ```
 
-`dir` 取值 `in` / `out` / `return`；`flags` 里的 `FUNC_Static` 决定调用形态
-（静态 → `EX_FinalFunction`，实例 → 需要 `EX_Context`）。
+**两层 key，别搞混**：
 
-## 构建
+| 层 | key 形态 |
+|---|---|
+| 对象层（`objects` 的 key） | 对象完整路径，如 `/Script/Engine.KismetSystemLibrary` |
+| 函数层（`functions` 的 key） | **短名**，取自对象路径最后一个 `:` 之后 |
 
-```bash
-git clone --recursive https://github.com/CCB-TEAM/solstice-jmap.git
-dotnet build src/JmapExtractor
+**例外**：outer 是 **Package** 的对象，其路径用 `.` 分隔、没有 `:`，短名提取会退化成完整路径。
+实测 47311 条对象里有 447 个这样的函数 key，**全部是 `__DelegateSignature`**：
+
+```json
+"/Script/AIModule": {
+  "type": "Package",
+  "functions": {
+    "/Script/AIModule.AIMoveCompletedSignature__DelegateSignature": { ... }
+  }
+}
 ```
 
-依赖 [CCB-TEAM/solstice-assetregistry](https://github.com/CCB-TEAM/solstice-assetregistry)
-（作为子模块引入，它自己又带两个子模块，所以必须 `--recursive`）。
+所以按短名索引时**要额外按后缀匹配一遍**，否则会静默漏掉所有 delegate 签名。
 
-## 注意
+### `dir` 的真实含义
 
+`dir` 只有三个取值，由属性标志推出（`src/JmapExtractor/Program.cs`）：
+
+```csharp
+var dir = flags.Contains("CPF_ReturnParm") ? "return"
+        : flags.Contains("CPF_OutParm")   ? "out"
+        : "in";
+```
+
+两个后果：
+
+1. **`CPF_ReferenceParm` / `CPF_ConstParm` 根本没被读**；
+2. `CPF_OutParm` 也会被 `UPARAM(ref)` 的**按引用入参**置上。
+
+实测 `Array_Add`：
+
+```json
+[{ "name": "TargetArray", "type": "ArrayProperty", "dir": "out" },
+ { "name": "NewItem",     "type": "IntProperty",   "dir": "out" },
+ { "name": "ReturnValue", "type": "IntProperty",   "dir": "return" }]
+```
+
+而调用点只读 `ReturnValue` —— `NewItem` 是纯输入。
+
+> **`dir=out` 只等于「按引用传递」，不等于「这是输出」。**
+> 要判定真正的输出参数，得另外拿 `CPF_ReferenceParm` / `CPF_ConstParm`（本工具目前不输出），
+> 或退回资产自身的 `LoadedProperties`。
+
+### `flags` 与调用形态
+
+`FUNC_Static` 只是**必要条件之一**。引擎在 `EX_FinalFunction` / `EX_LocalFinalFunction` /
+`EX_CallMath` / `EX_VirtualFunction` / `EX_Context` 之间选哪个，是六个条件的合取，
+其中一个（调用目标兼容性）在 jmap 里不存在，**无法完整复现**。
+所以 `flags` 不足以决定调用形态，详见 `solstice-kismet` 里 `CallShape` 的注释。
+
+## 已知边界
+
+- **`super` 恒为 null**：jmap 转储本身不提供继承关系（实测 47311/47311 全 null）。
+  **继承链要查 usmap**，别指望沿 `super` 走。
+- **没有 Property 条目**：`objects` 里只有 `Package` / `Enum` / `Class` / `Function` / `Object` /
+  `ScriptStruct` / `Asset` 七种类型。**类属性与结构成员都不在这里** —— 属性查 usmap，
+  或读资产自身的 `LoadedProperties`。
+- **`StructProperty` 的 `class` 是有值的**（取自转储的 `struct` 字段），形如
+  `"class": "/Script/Engine.LatentActionInfo"`，与 `offset` / `size` 一起给出。
+  但**结构成员**仍要查 usmap。
 - 产出的 JSON 只含**元数据**（路径、类型、偏移），不含任何游戏资源内容
-- `functions.kards.json` 是过滤版，体积约为完整版的 1/10
 - jmap 需要注入运行中的游戏进程才能导出，本仓库不涉及那部分
 
 ## 许可
